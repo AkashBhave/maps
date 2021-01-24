@@ -1,0 +1,9 @@
+# Code editors
+.vscode/
+.idea/
+
+# macOS
+.DS_Store
+
+# Strava archive
+/strava/archive
