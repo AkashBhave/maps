@@ -8,12 +8,17 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 )
+
+// GPSBabel is the location of the GPSBabel executable.
+const GPSBabel = "/Applications/GPSBabelFE.app/Contents/MacOS/gpsbabel"
 
 // StravaActivity holds Strava-calculated attributes about an activity.
 // I'm mainly interested in the filename of the route file (GPX/TCX/FIT).
@@ -32,6 +37,7 @@ type StravaActivity struct {
 	ElevationMax  float32
 }
 
+// Point holds useful information about a point along an activity track.
 type Point struct {
 	Lat       float64
 	Lon       float64
@@ -104,19 +110,18 @@ func ParseActivity(stravaActivity StravaActivity) {
 
 		switch fileParts[1] { // Parse the actual file
 		case "gpx":
-			break
 			ParseGPXFile(file)
 		case "tcx":
-			break
 			ParseTCXFile(file)
 		case "fit":
-			// ParseFITFile(stravaActivity, file)
+			ParseFITFile(file)
 		default:
 			break
 		}
 	}
 }
 
+// ParseGPXFile extracts information from a GPX file.
 func ParseGPXFile(file []byte) {
 	type GPXPoint struct {
 		Lat         float64 `xml:"lat,attr"`
@@ -139,6 +144,7 @@ func ParseGPXFile(file []byte) {
 	}
 }
 
+// ParseTCXFile extracts information from a TCX file.
 func ParseTCXFile(file []byte) {
 	type TCXPoint struct {
 		Lat       float64 `xml:"Position>LatitudeDegrees"`
@@ -148,9 +154,8 @@ func ParseTCXFile(file []byte) {
 		HeartRate float64 `xml:"HeartRateBpm>Value,omitempty"`
 	}
 	type Result struct {
-		XMLName xml.Name `xml:"TrainingCenterDatabase"`
-		// Track   *Track   `xml:"trk"`
-		Points []*TCXPoint `xml:"Activities>Activity>Lap>Track>Trackpoint"`
+		XMLName xml.Name    `xml:"TrainingCenterDatabase"`
+		Points  []*TCXPoint `xml:"Activities>Activity>Lap>Track>Trackpoint"`
 	}
 	result := &Result{}
 	err := xml.Unmarshal(file, &result)
@@ -158,4 +163,36 @@ func ParseTCXFile(file []byte) {
 		fmt.Printf("error: %v", err)
 		return
 	}
+}
+
+// ParseFITFile goes through a bunch of hurdles to extract information from a FIT file.
+// First, I need to write the byte array to a temporary file (since the orig. file may be compressed).
+// Next, I use GPSBabel to convert the temporary FIT file into a GPX file.
+// Finally, I invoke the good ol' ParseGPXFile function.
+// C'mon, Garmin, why is this so hard?
+func ParseFITFile(file []byte) {
+	tempFile, err := ioutil.TempFile("", "*.fit")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	defer os.Remove(tempFile.Name()) // Automatically delete the file
+
+	if _, err := tempFile.Write(file); err != nil {
+		log.Fatal(err)
+	}
+	if err := tempFile.Close(); err != nil {
+		log.Fatal(err)
+	}
+
+	newFile, err := exec.Command(
+		GPSBabel,
+		"-t",
+		"-i", "garmin_fit",
+		"-f", tempFile.Name(), // Read the temporary filename
+		"-o", "gpx",
+		"-F", "-", // Write to stdout
+	).Output()
+
+	ParseGPXFile(newFile)
 }
