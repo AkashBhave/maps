@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 )
@@ -13,11 +14,16 @@ func main() {
 	// Open the file
 	recordFile, err := os.Open(filepath.Join(ArchivePath, "activities.csv"))
 	if err != nil {
-		fmt.Println("An error encountered: ", err)
+		log.Fatal("An error while opening the activities file: ", err)
 	}
 
-	stravaActivities := ParseActivitiesFile(recordFile)
-	for _, stravaActivity := range stravaActivities {
-		ParseActivity(stravaActivity)
+	activities := ParseActivitiesFile(recordFile)
+	for _, activity := range activities {
+		points, err := ParseActivity(activity)
+		if err != nil {
+			log.Fatal("An error while reading an activity: ", err)
+		}
+		activity.Track = points
+		fmt.Println(activity)
 	}
 }

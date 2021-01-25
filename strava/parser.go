@@ -5,10 +5,8 @@ import (
 	"compress/gzip"
 	"encoding/csv"
 	"encoding/xml"
-	"fmt"
 	"io"
 	"io/ioutil"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,9 +18,9 @@ import (
 // GPSBabel is the location of the GPSBabel executable.
 const GPSBabel = "/Applications/GPSBabelFE.app/Contents/MacOS/gpsbabel"
 
-// StravaActivity holds Strava-calculated attributes about an activity.
+// Activity holds Strava-calculated attributes about an activity.
 // I'm mainly interested in the filename of the route file (GPX/TCX/FIT).
-type StravaActivity struct {
+type Activity struct {
 	Date          time.Time
 	Title         string
 	Type          string
@@ -35,6 +33,7 @@ type StravaActivity struct {
 	ElevationLoss float32
 	ElevationMin  float32
 	ElevationMax  float32
+	Track         []Point
 }
 
 // Point holds useful information about a point along an activity track.
@@ -49,13 +48,13 @@ type Point struct {
 
 // ParseActivitiesFile reads a Strava-generated CSV file of all activities.
 // Each record in the CSV holds the route filename as well as statistics about the activity.
-func ParseActivitiesFile(recordFile *os.File) []StravaActivity {
+func ParseActivitiesFile(recordFile *os.File) []Activity {
 	// Initialize the reader
 	reader := csv.NewReader(recordFile)
 	// Read all the records
 	activityRecords, _ := reader.ReadAll()
 
-	stravaActivities := make([]StravaActivity, len(activityRecords)-1)
+	activities := make([]Activity, len(activityRecords)-1)
 
 	// Loop through lines, ignoring the headers
 	for i, activityRecord := range activityRecords[1:] {
@@ -68,7 +67,7 @@ func ParseActivitiesFile(recordFile *os.File) []StravaActivity {
 		elevationMin, _ := strconv.ParseFloat(strings.Replace(activityRecord[20], ",", "", -1), 32)
 		elevationMax, _ := strconv.ParseFloat(strings.Replace(activityRecord[21], ",", "", -1), 32)
 
-		stravaActivities[i] = StravaActivity{
+		activities[i] = Activity{
 			Date:          time,
 			Title:         activityRecord[2],
 			Type:          activityRecord[3],
@@ -84,75 +83,90 @@ func ParseActivitiesFile(recordFile *os.File) []StravaActivity {
 		}
 	}
 
-	return stravaActivities
+	return activities
 }
 
 // ParseActivity reads a StravaActivity struct and invokes the corresponding route parser.
 // If the corresponding route is compressed, ParseActivity will decompress the file.
-func ParseActivity(stravaActivity StravaActivity) {
+func ParseActivity(stravaActivity Activity) ([]Point, error) {
 	filename := stravaActivity.Filename
 	if filename != "" { // Stationary activities (such as indoor row) do not have route files
-		file, _ := ioutil.ReadFile(filepath.Join(ArchivePath, filename)) // Byte array of decompresed file
-		fileParts := strings.Split(filename, ".")                        // Used to determine file type and compression status
-		if len(fileParts) == 3 && fileParts[2] == "gz" {                 // File is compressed
+		file, err := ioutil.ReadFile(filepath.Join(ArchivePath, filename)) // Byte array of decompresed file
+		if err != nil {
+			return nil, err
+		}
+		fileParts := strings.Split(filename, ".")        // Used to determine file type and compression status
+		if len(fileParts) == 3 && fileParts[2] == "gz" { // File is compressed
 			b := bytes.NewBuffer(file)
 			var r io.Reader
 			r, err := gzip.NewReader(b)
 			if err != nil {
-				return
+				return nil, err
 			}
 			var fileBuffer bytes.Buffer
 			_, err = fileBuffer.ReadFrom(r)
 			if err != nil {
-				return
+				return nil, err
 			}
 			file = fileBuffer.Bytes()
 		}
 
 		switch fileParts[1] { // Parse the actual file
 		case "gpx":
-			ParseGPXFile(file)
+			return ParseGPXFile(file)
 		case "tcx":
-			ParseTCXFile(file, false)
+			return ParseTCXFile(file, false)
 		case "fit":
-			ParseFITFile(file)
+			return ParseFITFile(file)
 		default:
-			break
+			return nil, nil
 		}
 	}
+
+	return nil, nil
 }
 
 // ParseGPXFile extracts information from a GPX file.
-func ParseGPXFile(file []byte) {
-	type GPXPoint struct {
-		Lat         float64 `xml:"lat,attr"`
-		Lon         float64 `xml:"lon,attr"`
-		Ele         float64 `xml:"ele,omitempty"`
-		Time        string  `xml:"time,omitempty"`
-		MagVar      string  `xml:"magvar,omitempty"`
-		GeoidHeight string  `xml:"geoidheight,omitempty"`
-		HeartRate   uint32  `xml:"extensions>TrackPointExtension>hr,omitempty"`
+func ParseGPXFile(file []byte) ([]Point, error) {
+	type ResultPoint struct {
+		Lat       float64   `xml:"lat,attr"`
+		Lon       float64   `xml:"lon,attr"`
+		Ele       float64   `xml:"ele,omitempty"`
+		Time      time.Time `xml:"time,omitempty"`
+		HeartRate uint32    `xml:"extensions>TrackPointExtension>hr,omitempty"`
+		Cadence   uint32    `xml:"extensions>TrackPointExtension>cad,omitempty"`
 	}
 	type Result struct {
 		XMLName xml.Name `xml:"gpx"`
 		// Track   *Track   `xml:"trk"`
-		Points []*GPXPoint `xml:"trk>trkseg>trkpt"`
+		Points []*ResultPoint `xml:"trk>trkseg>trkpt"`
 	}
 	result := &Result{}
 	err := xml.Unmarshal(file, &result)
 	if err != nil {
-		fmt.Printf("error: %v", err)
-		return
+		return nil, err
 	}
 
-	fmt.Println(result.Points)
+	// Convert ResultPoint to Point
+	points := make([]Point, len(result.Points))
+	for i, resultPoint := range result.Points {
+		points[i] = Point{
+			Lat:       resultPoint.Lat,
+			Lon:       resultPoint.Lon,
+			Ele:       resultPoint.Ele,
+			Time:      resultPoint.Time,
+			HeartRate: resultPoint.HeartRate,
+			Cadence:   resultPoint.Cadence,
+		}
+	}
+	return points, nil
 }
 
 // ParseTCXFile extracts information from a TCX file.
 // If `alt` is set, the function will assume the file was created with ParseFITFile.
 // Files created with ParseFITFile follow a slightly different format.
-func ParseTCXFile(file []byte, alt bool) {
-	type TCXPoint struct {
+func ParseTCXFile(file []byte, alt bool) ([]Point, error) {
+	type ResultPoint struct {
 		Lat       float64 `xml:"Position>LatitudeDegrees"`
 		Lon       float64 `xml:"Position>LongitudeDegrees"`
 		Ele       float64 `xml:"AltitudeMeters,omitempty"`
@@ -160,32 +174,42 @@ func ParseTCXFile(file []byte, alt bool) {
 		HeartRate uint32 `xml:"HeartRateBpm>Value,omitempty"`
 		Cadence   uint32 `xml:"Cadence,omitempty"`
 	}
-	var points []*TCXPoint
+	var resultPoints []*ResultPoint
 	var err error
 	if alt {
 		type Result struct {
-			XMLName xml.Name    `xml:"TrainingCenterDatabase"`
-			Points  []*TCXPoint `xml:"Courses>Course>Track>Trackpoint"`
+			XMLName xml.Name       `xml:"TrainingCenterDatabase"`
+			Points  []*ResultPoint `xml:"Courses>Course>Track>Trackpoint"`
 		}
 		result := &Result{}
 		err = xml.Unmarshal(file, &result)
-		points = result.Points
+		resultPoints = result.Points
 	} else {
 		type Result struct {
-			XMLName xml.Name    `xml:"TrainingCenterDatabase"`
-			Points  []*TCXPoint `xml:"Activities>Activity>Lap>Track>Trackpoint"`
+			XMLName xml.Name       `xml:"TrainingCenterDatabase"`
+			Points  []*ResultPoint `xml:"Activities>Activity>Lap>Track>Trackpoint"`
 		}
 		result := &Result{}
 		err = xml.Unmarshal(file, &result)
-		points = result.Points
+		resultPoints = result.Points
 	}
-
 	if err != nil {
-		fmt.Printf("error: %v", err)
-		return
+		return nil, err
 	}
 
-	fmt.Println(points)
+	// Convert ResultPoint to Point
+	points := make([]Point, len(resultPoints))
+	for i, resultPoint := range resultPoints {
+		points[i] = Point{
+			Lat:       resultPoint.Lat,
+			Lon:       resultPoint.Lon,
+			Ele:       resultPoint.Ele,
+			Time:      resultPoint.Time,
+			HeartRate: resultPoint.HeartRate,
+			Cadence:   resultPoint.Cadence,
+		}
+	}
+	return points, nil
 }
 
 // ParseFITFile goes through a bunch of hurdles to extract information from a FIT file.
@@ -193,19 +217,19 @@ func ParseTCXFile(file []byte, alt bool) {
 // Next, I use GPSBabel to convert the temporary FIT file into a TCX file.
 // Finally, I invoke the good ol' ParseTCXFile function.
 // C'mon, Garmin, why is this so hard?
-func ParseFITFile(file []byte) {
+func ParseFITFile(file []byte) ([]Point, error) {
 	tempFile, err := ioutil.TempFile("", "*.fit")
 	if err != nil {
-		log.Fatal(err)
+		return nil, err
 	}
 
 	defer os.Remove(tempFile.Name()) // Automatically delete the file
 
 	if _, err := tempFile.Write(file); err != nil {
-		log.Fatal(err)
+		return nil, err
 	}
 	if err := tempFile.Close(); err != nil {
-		log.Fatal(err)
+		return nil, err
 	}
 
 	newFile, err := exec.Command(
@@ -217,5 +241,6 @@ func ParseFITFile(file []byte) {
 		"-F", "-", // Write to stdout
 	).Output()
 
-	ParseTCXFile(newFile, true)
+	// Pass the converted TCX file to ParseTCXFile and return the result
+	return ParseTCXFile(newFile, true)
 }
