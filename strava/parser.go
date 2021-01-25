@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/csv"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -29,6 +30,14 @@ type StravaActivity struct {
 	ElevationLoss float32
 	ElevationMin  float32
 	ElevationMax  float32
+}
+
+type Point struct {
+	Lat       float64
+	Lon       float64
+	Ele       float64
+	Time      time.Time
+	HeartRate float64
 }
 
 // ParseActivitiesFile reads a Strava-generated CSV file of all activities.
@@ -91,7 +100,62 @@ func ParseActivity(stravaActivity StravaActivity) {
 				return
 			}
 			file = fileBuffer.Bytes()
-			fmt.Println(string(file[:100]))
 		}
+
+		switch fileParts[1] { // Parse the actual file
+		case "gpx":
+			break
+			ParseGPXFile(file)
+		case "tcx":
+			break
+			ParseTCXFile(file)
+		case "fit":
+			// ParseFITFile(stravaActivity, file)
+		default:
+			break
+		}
+	}
+}
+
+func ParseGPXFile(file []byte) {
+	type GPXPoint struct {
+		Lat         float64 `xml:"lat,attr"`
+		Lon         float64 `xml:"lon,attr"`
+		Ele         float64 `xml:"ele,omitempty"`
+		Time        string  `xml:"time,omitempty"`
+		MagVar      string  `xml:"magvar,omitempty"`
+		GeoidHeight string  `xml:"geoidheight,omitempty"`
+	}
+	type Result struct {
+		XMLName xml.Name `xml:"gpx"`
+		// Track   *Track   `xml:"trk"`
+		Points []*GPXPoint `xml:"trk>trkseg>trkpt"`
+	}
+	result := &Result{}
+	err := xml.Unmarshal(file, &result)
+	if err != nil {
+		fmt.Printf("error: %v", err)
+		return
+	}
+}
+
+func ParseTCXFile(file []byte) {
+	type TCXPoint struct {
+		Lat       float64 `xml:"Position>LatitudeDegrees"`
+		Lon       float64 `xml:"Position>LongitudeDegrees"`
+		Ele       float64 `xml:"AltitudeMeters,omitempty"`
+		Time      time.Time
+		HeartRate float64 `xml:"HeartRateBpm>Value,omitempty"`
+	}
+	type Result struct {
+		XMLName xml.Name `xml:"TrainingCenterDatabase"`
+		// Track   *Track   `xml:"trk"`
+		Points []*TCXPoint `xml:"Activities>Activity>Lap>Track>Trackpoint"`
+	}
+	result := &Result{}
+	err := xml.Unmarshal(file, &result)
+	if err != nil {
+		fmt.Printf("error: %v", err)
+		return
 	}
 }

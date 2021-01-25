@@ -17,7 +17,7 @@ func main() {
 	}
 
 	stravaActivities := ParseActivitiesFile(recordFile)
-	for _, stravaActivity := range stravaActivities[:100] {
+	for _, stravaActivity := range stravaActivities {
 		ParseActivity(stravaActivity)
 	}
 }
